@@ -53,8 +53,6 @@ Every behaviour change needs a test that would fail without it. The suites are:
   consistency at every commit stage through the documented fault injection
   facility.
 
-Do not add timeouts to tests. A hanging test is a defect.
-
 ## Commits
 
 Commit messages describe the change and its verification in plain language.
