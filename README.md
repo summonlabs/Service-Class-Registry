@@ -1,7 +1,6 @@
 # Service Class Registry
 
-Canonical registry of facility service classes for the DCCP control plane
-(repository 43 of 72, tranche 6: facility policy, tenancy, and entitlement).
+Canonical registry of facility service classes.
 
 A facility service class is what a facility promises about a workload: how
 available it is, how much redundancy and cooling it has, how it is maintained
