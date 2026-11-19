@@ -387,12 +387,32 @@ Result<void> publish_staged(const std::filesystem::path& staging_path, const std
   if (replace_existing) {
     flags |= MOVEFILE_REPLACE_EXISTING;
   }
-  if (!MoveFileExW(native_path(staging_path).c_str(), native_path(final_path).c_str(), flags)) {
-    const Status failure = win32_failure("rename", final_path, GetLastError());
-    static_cast<void>(remove_file(staging_path));
-    return Result<void>::failure(failure);
+  const auto native_staging = native_path(staging_path);
+  const auto native_final = native_path(final_path);
+  // While a reader has the target open (an inspection, a backup, an antivirus or
+  // indexing scan) the rename fails until the reader closes it, so it is retried
+  // for a bounded time (about 2 s). A directory or a read-only file in the way
+  // is not transient and fails at once, as does a target that already exists
+  // when it must not be replaced.
+  for (int attempt = 0;; ++attempt) {
+    if (MoveFileExW(native_staging.c_str(), native_final.c_str(), flags)) {
+      return ok_result();
+    }
+    const DWORD error = GetLastError();
+    const DWORD attributes = GetFileAttributesW(native_final.c_str());
+    const bool blocked =
+        attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY)) != 0;
+    const bool transient = (error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION ||
+                            error == ERROR_LOCK_VIOLATION) &&
+                           !blocked;
+    if (!transient || attempt >= 100) {
+      const Status failure = win32_failure("rename", final_path, error);
+      static_cast<void>(remove_file(staging_path));
+      return Result<void>::failure(failure);
+    }
+    Sleep(20);
   }
-  return ok_result();
 }
 
 std::string process_id_text() {

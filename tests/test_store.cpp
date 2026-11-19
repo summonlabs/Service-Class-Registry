@@ -1,9 +1,11 @@
 #include "harness.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "scr/bytes.hpp"
@@ -282,6 +284,62 @@ SCR_TEST(store_detects_rollback_and_repairs_the_guard) {
     SCR_CHECK(context, !reopened.value().info().guard_repaired);
     SCR_CHECK_EQ(context, reopened.value().info().sequence.value(), static_cast<std::uint64_t>(3));
   }
+}
+
+SCR_TEST(store_commit_waits_for_a_reader_of_the_manifest) {
+  Fixture fixture("store-manifest-reader");
+  auto store = create_store(fixture);
+  SCR_REQUIRE(context, store.ok());
+  const ClassRevision genesis = scrtest::make_simple_revision("store.core/hall", 1, 1, "genesis", 999000);
+  SCR_REQUIRE(context, store.value().publish(genesis, PublishOptions{}).ok());
+  const ClassRevision second = next_revision(store.value().registry(), "store.core/hall", 999900);
+
+  // A reader has the manifest open for a moment (an inspection, a backup, a
+  // scan) while the next commit replaces it.
+  std::ifstream reader(fixture.root() / "manifest", std::ios::binary);
+  const bool reader_open = static_cast<bool>(reader);
+  std::thread release([&reader] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    reader.close();
+  });
+  const auto published = store.value().publish(second, PublishOptions{});
+  release.join();
+  SCR_CHECK(context, reader_open);
+  SCR_CHECK(context, published.ok());
+  SCR_CHECK_EQ(context, store.value().info().sequence.value(), static_cast<std::uint64_t>(3));
+}
+
+SCR_TEST(store_published_commit_is_not_reported_as_failed_for_its_guard) {
+  Fixture fixture("store-guard-reader");
+  auto store = create_store(fixture);
+  SCR_REQUIRE(context, store.ok());
+  const ClassRevision genesis = scrtest::make_simple_revision("store.core/hall", 1, 1, "genesis", 999000);
+  SCR_REQUIRE(context, store.value().publish(genesis, PublishOptions{}).ok());
+  const ClassRevision second = next_revision(store.value().registry(), "store.core/hall", 999900);
+  {
+    // A reader holds the guard fence while a revision is committed: the
+    // manifest is published, and the guard cannot be replaced.
+    std::ifstream reader(fixture.root() / "guard", std::ios::binary);
+    SCR_CHECK(context, static_cast<bool>(reader));
+    // The manifest is the commit point. The publication is not reported as
+    // failed, and the registry keeps the revision the store now holds.
+    SCR_CHECK(context, store.value().publish(second, PublishOptions{}).ok());
+    SCR_CHECK_EQ(context, store.value().info().sequence.value(), static_cast<std::uint64_t>(3));
+    const auto record = store.value().registry().class_record(ClassId::parse("store.core/hall").value());
+    SCR_REQUIRE(context, record.ok());
+    SCR_CHECK_EQ(context, record.value().tip.value(), static_cast<std::uint32_t>(2));
+  }
+  // The next commit publishes the guard again.
+  const ClassRevision third = next_revision(store.value().registry(), "store.core/hall", 999990);
+  SCR_CHECK(context, store.value().publish(third, PublishOptions{}).ok());
+  SCR_CHECK_EQ(context, store.value().info().sequence.value(), static_cast<std::uint64_t>(4));
+  store.value() = Store{};
+
+  auto reopened = Store::open(fixture.root(), StoreMode::ReadWrite);
+  SCR_REQUIRE(context, reopened.ok());
+  SCR_CHECK(context, !reopened.value().info().guard_repaired);
+  SCR_CHECK_EQ(context, reopened.value().info().sequence.value(), static_cast<std::uint64_t>(4));
+  SCR_CHECK_EQ(context, reopened.value().info().revision_count, std::size_t{3});
 }
 
 SCR_TEST(store_compaction_removes_only_unreferenced_files) {

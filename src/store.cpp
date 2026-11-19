@@ -979,34 +979,44 @@ Result<CommitOutcome> Store::commit_locked(const Timestamp& at) {
   }
   fault_point("manifest-published");
 
-  GuardRecord guard;
-  guard.sequence = next_sequence.value();
-  guard.manifest_digest = frame_digest;
-  guard.epoch = data.epoch;
-  const auto guard_payload = encode_guard_payload(guard);
-  if (!guard_payload.ok()) {
-    return Result<CommitOutcome>::failure(guard_payload.status());
-  }
-  const auto guard_frame = encode_frame(FrameKind::StoreGuard, guard_payload.value(), kMaxGuardPayloadBytes);
-  if (!guard_frame.ok()) {
-    return Result<CommitOutcome>::failure(guard_frame.status());
-  }
-  const auto staged_guard = staging_path / (std::string(kGuardFileName) + kStagingSuffix);
-  const auto guard_staged = platform::write_file_staged(staged_guard, guard_frame.value());
-  if (!guard_staged.ok()) {
-    return Result<CommitOutcome>::failure(guard_staged.status());
-  }
-  const auto guard_readback = platform::read_file(staged_guard, kMaxGuardFileBytes);
-  if (!guard_readback.ok() || guard_readback.value() != guard_frame.value()) {
-    return Result<CommitOutcome>::failure(Status::failure(
-        ErrorCode::CorruptStore, "the staged guard fence did not verify before publication", "store"));
-  }
-  fault_point("guard-staged");
-  const auto guard_published = platform::publish_staged(staged_guard, guard_path, true);
-  if (!guard_published.ok()) {
-    return Result<CommitOutcome>::failure(guard_published.status());
-  }
-  fault_point("guard-published");
+  // The manifest is the commit point: an open accepts a manifest that is ahead
+  // of the guard fence and repairs the guard. The commit therefore stands from
+  // here on. A guard that cannot be published now (a reader holds it) does not
+  // turn the commit into a failure, which would have the caller roll back a
+  // change the store has made durable; the next commit, or the next writable
+  // open, publishes the guard again.
+  const auto publish_guard = [&]() -> Status {
+    GuardRecord guard;
+    guard.sequence = next_sequence.value();
+    guard.manifest_digest = frame_digest;
+    guard.epoch = data.epoch;
+    const auto guard_payload = encode_guard_payload(guard);
+    if (!guard_payload.ok()) {
+      return guard_payload.status();
+    }
+    const auto guard_frame = encode_frame(FrameKind::StoreGuard, guard_payload.value(), kMaxGuardPayloadBytes);
+    if (!guard_frame.ok()) {
+      return guard_frame.status();
+    }
+    const auto staged_guard = staging_path / (std::string(kGuardFileName) + kStagingSuffix);
+    const auto guard_staged = platform::write_file_staged(staged_guard, guard_frame.value());
+    if (!guard_staged.ok()) {
+      return guard_staged.status();
+    }
+    const auto guard_readback = platform::read_file(staged_guard, kMaxGuardFileBytes);
+    if (!guard_readback.ok() || guard_readback.value() != guard_frame.value()) {
+      return Status::failure(ErrorCode::CorruptStore,
+                             "the staged guard fence did not verify before publication", "store");
+    }
+    fault_point("guard-staged");
+    const auto guard_published = platform::publish_staged(staged_guard, guard_path, true);
+    if (!guard_published.ok()) {
+      return guard_published.status();
+    }
+    fault_point("guard-published");
+    return Status::success();
+  };
+  static_cast<void>(publish_guard());
 
   manifest_frame_ = frame.value();
   info_.sequence = next_sequence.value();
